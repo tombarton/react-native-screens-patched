@@ -1,25 +1,22 @@
 package com.swmansion.rnscreens;
 
-import android.annotation.SuppressLint;
 import android.content.Context;
 import android.graphics.Paint;
-import android.os.Bundle;
-import android.view.LayoutInflater;
+import android.os.Parcelable;
+import android.util.SparseArray;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.WindowManager;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.TextView;
 
 import androidx.annotation.Nullable;
-import androidx.fragment.app.Fragment;
 
+import com.facebook.react.bridge.GuardedRunnable;
 import com.facebook.react.bridge.ReactContext;
-import com.facebook.react.uimanager.PointerEvents;
-import com.facebook.react.uimanager.ReactPointerEventsView;
 import com.facebook.react.uimanager.UIManagerModule;
-import com.facebook.react.uimanager.events.EventDispatcher;
 
-public class Screen extends ViewGroup implements ReactPointerEventsView {
+public class Screen extends ViewGroup {
 
   public enum StackPresentation {
     PUSH,
@@ -31,34 +28,6 @@ public class Screen extends ViewGroup implements ReactPointerEventsView {
     DEFAULT,
     NONE,
     FADE
-  }
-
-  public static class ScreenFragment extends Fragment {
-
-    private Screen mScreenView;
-
-    public ScreenFragment() {
-      throw new IllegalStateException("Screen fragments should never be restored");
-    }
-
-    @SuppressLint("ValidFragment")
-    public ScreenFragment(Screen screenView) {
-      super();
-      mScreenView = screenView;
-    }
-
-    @Override
-    public View onCreateView(LayoutInflater inflater,
-                             @Nullable ViewGroup container,
-                             @Nullable Bundle savedInstanceState) {
-      return mScreenView;
-    }
-
-    @Override
-    public void onDestroy() {
-      super.onDestroy();
-      mScreenView.mEventDispatcher.dispatchEvent(new ScreenDismissedEvent(mScreenView.getId()));
-    }
   }
 
   private static OnAttachStateChangeListener sShowSoftKeyboardOnAttach = new OnAttachStateChangeListener() {
@@ -77,23 +46,64 @@ public class Screen extends ViewGroup implements ReactPointerEventsView {
     }
   };
 
-  private final Fragment mFragment;
-  private final EventDispatcher mEventDispatcher;
+  private @Nullable ScreenFragment mFragment;
   private @Nullable ScreenContainer mContainer;
   private boolean mActive;
   private boolean mTransitioning;
   private StackPresentation mStackPresentation = StackPresentation.PUSH;
   private StackAnimation mStackAnimation = StackAnimation.DEFAULT;
+  private boolean mGestureEnabled = true;
+
+  @Override
+  protected void onAnimationEnd() {
+    super.onAnimationEnd();
+    if (mFragment != null) {
+      mFragment.onViewAnimationEnd();
+    }
+  }
 
   public Screen(ReactContext context) {
     super(context);
-    mFragment = new ScreenFragment(this);
-    mEventDispatcher = context.getNativeModule(UIManagerModule.class).getEventDispatcher();
+    // we set layout params as WindowManager.LayoutParams to workaround the issue with TextInputs
+    // not displaying modal menus (e.g., copy/paste or selection). The missing menus are due to the
+    // fact that TextView implementation is expected to be attached to window when layout happens.
+    // Then, at the moment of layout it checks whether window type is in a reasonable range to tell
+    // whether it should enable selection controlls (see Editor.java#prepareCursorControllers).
+    // With screens, however, the text input component can be laid out before it is attached, in that
+    // case TextView tries to get window type property from the oldest existing parent, which in this
+    // case is a Screen class, as it is the root of the screen that is about to be attached. Setting
+    // params this way is not the most elegant way to solve this problem but workarounds it for the
+    // time being
+    setLayoutParams(new WindowManager.LayoutParams(WindowManager.LayoutParams.TYPE_APPLICATION));
   }
 
   @Override
-  protected void onLayout(boolean changed, int l, int t, int b, int r) {
-    // no-op
+  protected void dispatchSaveInstanceState(SparseArray<Parcelable> container) {
+    // do nothing, react native will keep the view hierarchy so no need to serialize/deserialize
+    // view's states. The side effect of restoring is that TextInput components would trigger set-text
+    // events which may confuse text input handling.
+  }
+
+  @Override
+  protected void dispatchRestoreInstanceState(SparseArray<Parcelable> container) {
+    // ignore restoring instance state too as we are not saving anything anyways.
+  }
+
+  @Override
+  protected void onLayout(boolean changed, int l, int t, int r, int b) {
+    if (changed) {
+      final int width = r - l;
+      final int height = b - t;
+      final ReactContext reactContext = (ReactContext) getContext();
+      reactContext.runOnNativeModulesQueueThread(
+              new GuardedRunnable(reactContext) {
+                @Override
+                public void runGuarded() {
+                  reactContext.getNativeModule(UIManagerModule.class)
+                          .updateNodeSize(getId(), width, height);
+                }
+              });
+    }
   }
 
   @Override
@@ -144,17 +154,16 @@ public class Screen extends ViewGroup implements ReactPointerEventsView {
     mStackAnimation = stackAnimation;
   }
 
+  public void setGestureEnabled(boolean gestureEnabled) {
+    mGestureEnabled = gestureEnabled;
+  }
+
   public StackAnimation getStackAnimation() {
     return mStackAnimation;
   }
 
   public StackPresentation getStackPresentation() {
     return mStackPresentation;
-  }
-
-  @Override
-  public PointerEvents getPointerEvents() {
-    return mTransitioning ? PointerEvents.NONE : PointerEvents.AUTO;
   }
 
   @Override
@@ -166,12 +175,16 @@ public class Screen extends ViewGroup implements ReactPointerEventsView {
     mContainer = container;
   }
 
-  protected @Nullable ScreenContainer getContainer() {
-    return mContainer;
+  protected void setFragment(ScreenFragment fragment) {
+    mFragment = fragment;
   }
 
-  protected Fragment getFragment() {
+  protected @Nullable ScreenFragment getFragment() {
     return mFragment;
+  }
+
+  protected @Nullable ScreenContainer getContainer() {
+    return mContainer;
   }
 
   public void setActive(boolean active) {
@@ -186,5 +199,9 @@ public class Screen extends ViewGroup implements ReactPointerEventsView {
 
   public boolean isActive() {
     return mActive;
+  }
+
+  public boolean isGestureEnabled() {
+    return mGestureEnabled;
   }
 }
